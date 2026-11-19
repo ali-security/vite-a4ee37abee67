@@ -30,6 +30,38 @@ const getViteTestIndexHtmlUrl = () => {
 
 const stringified = JSON.stringify(testJSON)
 
+const sendRawRequest = async (baseUrl: string, requestTarget: string) => {
+  return new Promise<string>((resolve, reject) => {
+    const parsedUrl = new URL(baseUrl)
+
+    const buf: Buffer[] = []
+    const client = net.createConnection(
+      { port: +parsedUrl.port, host: parsedUrl.hostname },
+      () => {
+        client.write(
+          [
+            `GET ${encodeURI(requestTarget)} HTTP/1.1`,
+            `Host: ${parsedUrl.host}`,
+            'Connection: Close',
+            '\r\n',
+          ].join('\r\n'),
+        )
+      },
+    )
+    client.on('data', (data) => {
+      buf.push(data)
+    })
+    client.on('end', (hadError) => {
+      if (!hadError) {
+        resolve(Buffer.concat(buf).toString())
+      }
+    })
+    client.on('error', (err) => {
+      reject(err)
+    })
+  })
+}
+
 describe.runIf(isServe)('main', () => {
   beforeAll(async () => {
     await page.goto(getViteTestIndexHtmlUrl())
@@ -69,6 +101,15 @@ describe.runIf(isServe)('main', () => {
   test('unsafe fetch', async () => {
     expect(await page.textContent('.unsafe-fetch')).toMatch('403 Restricted')
     expect(await page.textContent('.unsafe-fetch-status')).toBe('403')
+  })
+
+  test('unsafe HTML fetch', async () => {
+    await expect
+      .poll(() => page.textContent('.unsafe-fetch-html'))
+      .toMatch('403 Restricted')
+    await expect
+      .poll(() => page.textContent('.unsafe-fetch-html-status'))
+      .toBe('403')
   })
 
   test('unsafe fetch with special characters (#8498)', async () => {
@@ -127,6 +168,15 @@ describe.runIf(isServe)('main', () => {
   test('unsafe fs fetch', async () => {
     expect(await page.textContent('.unsafe-fs-fetch')).toBe('')
     expect(await page.textContent('.unsafe-fs-fetch-status')).toBe('403')
+  })
+
+  test('unsafe fs HTML fetch', async () => {
+    await expect
+      .poll(() => page.textContent('.unsafe-fs-fetch-html'))
+      .toMatch('403 Restricted')
+    await expect
+      .poll(() => page.textContent('.unsafe-fs-fetch-html-status'))
+      .toBe('403')
   })
 
   test('unsafe fs fetch', async () => {
@@ -426,38 +476,6 @@ describe('cross origin', () => {
 })
 
 describe.runIf(isServe)('invalid request', () => {
-  const sendRawRequest = async (baseUrl: string, requestTarget: string) => {
-    return new Promise<string>((resolve, reject) => {
-      const parsedUrl = new URL(baseUrl)
-
-      const buf: Buffer[] = []
-      const client = net.createConnection(
-        { port: +parsedUrl.port, host: parsedUrl.hostname },
-        () => {
-          client.write(
-            [
-              `GET ${encodeURI(requestTarget)} HTTP/1.1`,
-              `Host: ${parsedUrl.host}`,
-              'Connection: Close',
-              '\r\n',
-            ].join('\r\n'),
-          )
-        },
-      )
-      client.on('data', (data) => {
-        buf.push(data)
-      })
-      client.on('end', (hadError) => {
-        if (!hadError) {
-          resolve(Buffer.concat(buf).toString())
-        }
-      })
-      client.on('error', (err) => {
-        reject(err)
-      })
-    })
-  }
-
   const root = path
     .resolve(__dirname.replace('playground', 'playground-temp'), '..')
     .replace(/\\/g, '/')
@@ -528,5 +546,33 @@ describe.runIf(isServe)('invalid request', () => {
       path.posix.join('/@fs/', root, 'root/src/dummy.crt/') + '.',
     )
     expect(response).toContain('HTTP/1.1 403 Forbidden')
+  })
+
+  test('should deny request to HTML file outside root by default with relative path', async () => {
+    const response = await sendRawRequest(viteTestUrl, '/../unsafe.html')
+    expect(response).toContain('HTTP/1.1 403 Forbidden')
+  })
+})
+
+describe.runIf(!isServe)('preview HTML', () => {
+  test('unsafe HTML fetch', async () => {
+    await expect.poll(() => page.textContent('.unsafe-fetch-html')).toBe('')
+    await expect
+      .poll(() => page.textContent('.unsafe-fetch-html-status'))
+      .toBe('404')
+  })
+
+  test('should not serve HTML file outside outDir with relative path', async () => {
+    const response = await sendRawRequest(viteTestUrl, '/../unsafe.html')
+    expect(response).toContain('HTTP/1.1 404 Not Found')
+    expect(response).not.toContain('<p>unsafe</p>')
+  })
+
+  test('should not serve HTML file outside outDir with encoded relative path', async () => {
+    for (const requestTarget of ['/..%2Funsafe.html', '/..%5Cunsafe.html']) {
+      const res = await fetch(new URL(requestTarget, viteTestUrl).href)
+      expect(res.status).toBe(404)
+      expect(await res.text()).not.toContain('<p>unsafe</p>')
+    }
   })
 })

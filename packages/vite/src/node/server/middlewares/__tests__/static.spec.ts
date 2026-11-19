@@ -11,6 +11,7 @@ import { isWindows } from '../../../../shared/utils'
 import {
   isFileLoadingAllowed,
   isFileServingAllowed,
+  isUriInFilePath,
   looksLikeWindowsShortNamePath,
 } from '../static'
 
@@ -220,6 +221,19 @@ describe('static file serving access check', () => {
     // inside of `server.fs.allow`, but denied by the default `server.fs.deny`
     fs.writeFileSync(path.join(root, 'src/dummy.crt'), 'KEY=unsafe-crt')
     fs.writeFileSync(path.join(root, 'src/.env'), 'KEY=unsafe-dotenv')
+    // HTML files are served by the html middlewares instead of sirv
+    fs.writeFileSync(path.join(root, 'src/safe.html'), '<p>KEY=safe-html</p>')
+    fs.writeFileSync(
+      path.join(root, 'src/.env.html'),
+      '<p>KEY=unsafe-dotenv-html</p>',
+    )
+    // inside of root, but outside of `server.fs.allow`
+    fs.writeFileSync(path.join(root, 'unsafe.html'), '<p>KEY=unsafe-html</p>')
+    // outside of root
+    fs.writeFileSync(
+      path.join(tmpDir, 'outside.html'),
+      '<p>KEY=unsafe-outside-html</p>',
+    )
     fsRoot = path.posix.join('/@fs/', root.replace(/\\/g, '/'))
 
     server = await createServer({
@@ -289,4 +303,61 @@ describe('static file serving access check', () => {
     expect(response).toMatch(/^HTTP\/1\.1 40[34] /)
     expect(response).not.toContain('KEY=unsafe-dotenv')
   })
+
+  test('should serve HTML files inside of the allow list', async () => {
+    const response = await sendRawRequest('/src/safe.html')
+    expect(response).toContain('HTTP/1.1 200 OK')
+    expect(response).toContain('KEY=safe-html')
+  })
+
+  test('should deny HTML files outside of the allow list', async () => {
+    const response = await sendRawRequest('/unsafe.html')
+    expect(response).toContain('HTTP/1.1 403 Forbidden')
+    expect(response).not.toContain('KEY=unsafe-html')
+  })
+
+  test('should deny HTML files matching fs.deny', async () => {
+    const response = await sendRawRequest('/src/.env.html')
+    expect(response).toContain('HTTP/1.1 403 Forbidden')
+    expect(response).not.toContain('KEY=unsafe-dotenv-html')
+  })
+
+  test('should deny HTML files outside of root with relative path', async () => {
+    const response = await sendRawRequest('/../outside.html')
+    expect(response).toContain('HTTP/1.1 403 Forbidden')
+    expect(response).not.toContain('KEY=unsafe-outside-html')
+  })
+
+  test('should deny HTML files outside of the allow list with /@fs/', async () => {
+    const response = await sendRawRequest(`${fsRoot}/unsafe.html`)
+    expect(response).toContain('HTTP/1.1 403 Forbidden')
+    expect(response).not.toContain('KEY=unsafe-html')
+  })
+})
+
+describe('isUriInFilePath', () => {
+  const cases = {
+    '/parent': {
+      '/parent': true,
+      '/parenta': false,
+      '/parent/': true,
+      '/parent/child': true,
+      '/parent/child/child2': true,
+    },
+    '/parent/': {
+      '/parent': false,
+      '/parenta': false,
+      '/parent/': true,
+      '/parent/child': true,
+      '/parent/child/child2': true,
+    },
+  }
+
+  for (const [parent, children] of Object.entries(cases)) {
+    for (const [child, expected] of Object.entries(children)) {
+      test(`isUriInFilePath("${parent}", "${child}")`, () => {
+        expect(isUriInFilePath(parent, child)).toBe(expected)
+      })
+    }
+  }
 })
