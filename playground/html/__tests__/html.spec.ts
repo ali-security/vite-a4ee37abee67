@@ -453,6 +453,32 @@ test('html serve behavior', async () => {
   expect(await bothSlashIndexHtml.text()).toContain('both/index.html')
 })
 
+test.runIf(isServe)(
+  'normalizes protocol-relative HTML proxy URLs',
+  async () => {
+    const response = await fetchHtml('//protocol-relative.html')
+    const html = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(html).toContain('url(./protocol-relative.png)')
+    expect(html).toContain(
+      'src="/protocol-relative.html?html-proxy&index=0.js"',
+    )
+    expect(html).not.toContain('url(//protocol-relative.png)')
+    expect(html).not.toContain('src="//protocol-relative.html?html-proxy')
+    expect(
+      viteServer.moduleGraph.urlToModuleMap.has(
+        '/protocol-relative.html?html-proxy&direct&index=0.css',
+      ),
+    ).toBe(true)
+    expect(
+      viteServer.moduleGraph.urlToModuleMap.has(
+        '//protocol-relative.html?html-proxy&direct&index=0.css',
+      ),
+    ).toBe(false)
+  },
+)
+
 test('html fallback works non browser accept header', async () => {
   expect((await fetch(viteTestUrl, { headers: { Accept: '' } })).status).toBe(
     200,
