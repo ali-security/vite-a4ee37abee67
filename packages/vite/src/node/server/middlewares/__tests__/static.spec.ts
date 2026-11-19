@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import picomatch from 'picomatch'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import type { ViteDevServer } from '../../index'
 import { createServer } from '../../index'
@@ -174,6 +175,24 @@ describe('isFileLoadingAllowed', () => {
     expect(isAllowed(`${root}/ENV~1`)).toBe(false)
     expect(isAllowed(`${root}/GIT~1/config`)).toBe(false)
   })
+
+  // On Windows, `fs.readFile('/foo/.env/')` (e.g. from a request ending with
+  // `\`) reads `/foo/.env`, so a trailing slash must not bypass `fs.deny`
+  test('denies a file matching fs.deny with a trailing slash', () => {
+    const denyGlobServer = createStubServer(root)
+    // same matcher as the dev server builds from the default `fs.deny`
+    denyGlobServer._fsDenyGlob = picomatch(
+      ['**/.env', '**/.env.*', '**/*.{crt,pem}'],
+      { matchBase: false, nocase: true, dot: true },
+    )
+    const isAllowedByDenyGlob = (p: string) =>
+      isFileLoadingAllowed(denyGlobServer, p)
+
+    expect(isAllowedByDenyGlob(`${root}/src/main.js`)).toBe(true)
+    expect(isAllowedByDenyGlob(`${root}/src/.env`)).toBe(false)
+    expect(isAllowedByDenyGlob(`${root}/src/.env/`)).toBe(false)
+    expect(isAllowedByDenyGlob(`${root}/src/dummy.crt/`)).toBe(false)
+  })
 })
 
 describe('static file serving access check', () => {
@@ -294,6 +313,23 @@ describe('static file serving access check', () => {
     const response = await sendRawRequest(`${fsRoot}/src/dummy.crt/.`)
     expect(response).toContain('HTTP/1.1 403 Forbidden')
     expect(response).not.toContain('KEY=unsafe-crt')
+  })
+
+  // On Windows, `.env\` resolves to `.env`
+  test('should deny files matching fs.deny when a request ends with \\', async () => {
+    const response = await sendRawRequest('/src/.env\\')
+    expect(response).toContain(
+      isWindows ? 'HTTP/1.1 403 Forbidden' : 'HTTP/1.1 404 Not Found',
+    )
+    expect(response).not.toContain('KEY=unsafe-dotenv')
+  })
+
+  test('should deny files matching fs.deny with /@fs/ when a request ends with \\', async () => {
+    const response = await sendRawRequest(`${fsRoot}/src/.env\\`)
+    expect(response).toContain(
+      isWindows ? 'HTTP/1.1 403 Forbidden' : 'HTTP/1.1 404 Not Found',
+    )
+    expect(response).not.toContain('KEY=unsafe-dotenv')
   })
 
   // On NTFS, `.env::$DATA` is the default data stream of `.env`
