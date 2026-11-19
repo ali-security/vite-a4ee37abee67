@@ -4,6 +4,9 @@
 <pre class="full"></pre>
 <pre class="named"></pre>
 
+<h2>Safe Module Path Access Isolation</h2>
+<pre class="safe-module-path-status"></pre>
+
 <h2>Safe Fetch</h2>
 <pre class="safe-fetch-status"></pre>
 <pre class="safe-fetch"></pre>
@@ -73,6 +76,7 @@
 <script type="module">
   import '../../entry'
   import json, { msg } from '../../safe.json'
+  import 'virtual:safe-module-path-confusion'
   import './code.js'
 
   // Check virtual svg module still works
@@ -98,6 +102,18 @@
   const base = typeof BASE !== 'undefined' ? BASE : ''
   const dotEnvWindows83ShortName =
     typeof DOTENV83SHORTNAME !== 'undefined' ? DOTENV83SHORTNAME : undefined
+
+  // a module whose root-relative URL equals the absolute path of a file
+  // outside of the allow list should not make that file servable
+  fetch(
+    joinUrlSegments(base, joinUrlSegments('/@fs/', ROOT) + '/root/unsafe.txt'),
+  )
+    .then((r) => {
+      text('.safe-module-path-status', r.status)
+    })
+    .catch((e) => {
+      console.error(e)
+    })
 
   // inside allowed dir, safe fetch
   fetch(joinUrlSegments(base, '/src/safe.txt'))

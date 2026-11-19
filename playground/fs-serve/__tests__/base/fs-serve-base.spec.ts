@@ -24,6 +24,12 @@ describe.runIf(isServe)('main', () => {
     expect(await page.textContent('.named')).toBe(testJSON.msg)
   })
 
+  test('keeps root-relative module URLs separate from absolute filesystem paths', async () => {
+    await expect
+      .poll(() => page.textContent('.safe-module-path-status'))
+      .toBe('403')
+  })
+
   test('safe fetch', async () => {
     expect(await page.textContent('.safe-fetch')).toMatch('KEY=safe')
     expect(await page.textContent('.safe-fetch-status')).toBe('200')
