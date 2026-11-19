@@ -127,3 +127,24 @@ index 33afe1b0e5b9974f8feb6b3fe586c36e30f867b4..0d5a4ed5f3efb3a05750628b15157014
 +    fileName = `./${path.relative('', fileName)}`
    }
  
+diff --git a/index.js b/index.js
+index 0d5a4ed5f3efb3a05750628b15157014c5d3d66e..387b7370e106f732d3b5b8939b1fe02c555bf149 100644
+--- a/index.js
++++ b/index.js
+@@ -48,7 +48,15 @@ function isTerminalEditor (editor) {
+ 
+ const positionRE = /:(\d+)(:(\d+))?$/
+ function parseFile (file) {
+-  const fileName = file.replace(positionRE, '')
++  const unresolvedFileName = file.replace(positionRE, '')
++  // Resolve the file name only after the position has been stripped, so that
++  // the existence check sees the same path as the editor. Otherwise a `..`
++  // component hidden behind a position suffix (e.g. `C:\project\x\..:1:1`)
++  // lets a directory that does not exist pass the check on Windows, which
++  // collapses `..` before looking the path up.
++  const fileName = unresolvedFileName
++    ? (process.platform === 'win32' ? path.win32 : path.posix).resolve(unresolvedFileName)
++    : ''
+   const match = file.match(positionRE)
+   const lineNumber = match && match[1]
+   const columnNumber = match && match[3]

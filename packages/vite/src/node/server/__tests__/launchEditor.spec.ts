@@ -187,6 +187,7 @@ describe('launch-editor command injection on Windows', () => {
   describe('/__open-in-editor middleware', () => {
     let tmpDir: string
     let maliciousFile: string
+    let existsSyncSpy: MockInstance | undefined
 
     beforeEach(() => {
       tmpDir = fs.realpathSync(
@@ -196,9 +197,19 @@ describe('launch-editor command injection on Windows', () => {
       maliciousFile = path.join(tmpDir, 'poc&calc.exe&.js')
       fs.writeFileSync(maliciousFile, '')
       vi.stubEnv('LAUNCH_EDITOR', 'code')
+      // launch-editor looks the file up by its `path.win32` resolved name
+      // while the platform is mocked, which a POSIX host cannot find
+      if (!isWindows) {
+        const fileName = path.win32.resolve(maliciousFile)
+        existsSyncSpy = vi
+          .spyOn(fs, 'existsSync')
+          .mockImplementation((p) => p === fileName)
+      }
     })
 
     afterEach(() => {
+      existsSyncSpy?.mockRestore()
+      existsSyncSpy = undefined
       vi.unstubAllEnvs()
       fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 5 })
     })
@@ -384,4 +395,132 @@ describe('launch-editor argument injection', () => {
       expect(spawnedArgs('vim')).toEqual([`./${file}`])
     })
   })
+})
+
+// A position suffix can turn the last path component into `..` once it is
+// stripped, e.g. `C:\project\& calc.exe & rem \..:1:1`. Windows collapses
+// `..` when looking a path up, so checking the unresolved file name lets a
+// component that does not exist on disk pass the existence check.
+describe('launch-editor existence check', () => {
+  let execSpy: MockInstance
+  let spawnSpy: MockInstance
+  let existsSyncSpy: MockInstance
+  let logSpy: MockInstance
+
+  beforeEach(() => {
+    execSpy = vi
+      .spyOn(childProcess, 'exec')
+      .mockImplementation((() => createFakeChildProcess()) as any)
+    spawnSpy = vi
+      .spyOn(childProcess, 'spawn')
+      .mockImplementation((() => createFakeChildProcess()) as any)
+    existsSyncSpy = vi.spyOn(fs, 'existsSync').mockReturnValue(true)
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', platformDescriptor)
+    execSpy.mockRestore()
+    spawnSpy.mockRestore()
+    existsSyncSpy.mockRestore()
+    logSpy.mockRestore()
+  })
+
+  const project = '/project'
+  const parentDirFile = `${project}/attacker-controlled/..:1:1`
+
+  test('checks the existence of the resolved file name', () => {
+    setPlatform('linux')
+    existsSyncSpy.mockReturnValue(false)
+    const onError = vi.fn()
+    launchEditor(parentDirFile, 'code', onError)
+    expect(existsSyncSpy).toHaveBeenCalledTimes(1)
+    expect(existsSyncSpy).toHaveBeenCalledWith(project)
+    expect(spawnSpy).not.toHaveBeenCalled()
+    expect(onError).not.toHaveBeenCalled()
+  })
+
+  test('hands the resolved file name to the editor and onError', () => {
+    setPlatform('linux')
+    const editorProcess = createFakeChildProcess()
+    spawnSpy.mockReturnValue(editorProcess as any)
+    const onError = vi.fn()
+    launchEditor(parentDirFile, 'code', onError)
+    editorProcess.emit('exit', 1)
+    expect(spawnSpy).toHaveBeenCalledWith(
+      'code',
+      ['-r', '-g', `${project}:1:1`],
+      { stdio: 'inherit' },
+    )
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0][0]).toBe(project)
+  })
+
+  test('resolves relative file names', () => {
+    setPlatform('linux')
+    launchEditor('./file.js:1:1', 'code')
+    const fileName = path.posix.resolve('file.js')
+    expect(existsSyncSpy).toHaveBeenCalledWith(fileName)
+    expect(spawnSpy).toHaveBeenCalledWith(
+      'code',
+      ['-r', '-g', `${fileName}:1:1`],
+      { stdio: 'inherit' },
+    )
+  })
+
+  test('does not resolve an empty file name to the working directory', () => {
+    setPlatform('linux')
+    existsSyncSpy.mockReturnValue(false)
+    launchEditor(':1:1', 'code')
+    expect(existsSyncSpy).toHaveBeenCalledWith('')
+    expect(spawnSpy).not.toHaveBeenCalled()
+  })
+
+  // like Windows, collapse `..` before looking a path up, so that only the
+  // `project` directory has to exist
+  function windowsExistsSync(p: unknown): boolean {
+    return path.win32.basename(path.win32.resolve(String(p))) === 'project'
+  }
+
+  const payloads = [
+    'C:\\project\\& calc.exe & rem \\..:1:1',
+    'C:\\project\\%COMSPEC%\\..:1:1',
+  ]
+
+  test.each(payloads)('does not let %j pass the check', (payload) => {
+    setPlatform('win32')
+    existsSyncSpy.mockImplementation(windowsExistsSync)
+    const onError = vi.fn()
+    launchEditor(payload, 'code', onError)
+    expect(existsSyncSpy).toHaveBeenCalledTimes(1)
+    expect(existsSyncSpy).toHaveBeenCalledWith('C:\\project')
+    expect(onError).not.toHaveBeenCalled()
+    expect(spawnSpy).not.toHaveBeenCalled()
+    expect(execSpy).toHaveBeenCalledTimes(1)
+    expect(execSpy.mock.calls[0][0]).toBe('code -r -g C:\\project:1:1')
+  })
+
+  test.each(payloads)(
+    'middleware does not let %j pass the check',
+    (payload) => {
+      setPlatform('win32')
+      existsSyncSpy.mockImplementation(windowsExistsSync)
+      const end = vi.fn()
+      vi.stubEnv('LAUNCH_EDITOR', 'code')
+      try {
+        launchEditorMiddleware()(
+          { url: `/?file=${encodeURIComponent(payload)}` },
+          { end },
+        )
+      } finally {
+        vi.unstubAllEnvs()
+      }
+      expect(end).toHaveBeenCalledTimes(1)
+      expect(existsSyncSpy).toHaveBeenCalledTimes(1)
+      const checked = String(existsSyncSpy.mock.calls[0][0])
+      expect(checked).not.toMatch(/calc\.exe|COMSPEC/)
+      expect(execSpy).toHaveBeenCalledTimes(1)
+      expect(execSpy.mock.calls[0][0]).not.toMatch(/calc\.exe|COMSPEC/)
+    },
+  )
 })
