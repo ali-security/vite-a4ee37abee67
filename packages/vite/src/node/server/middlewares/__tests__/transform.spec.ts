@@ -7,6 +7,23 @@ import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import type { ViteDevServer } from '../../index'
 import { createServer } from '../../index'
+import { isWindows } from '../../../../shared/utils'
+
+// On Windows, `/@fs/` urls are served from the root of the drive of the cwd,
+// so the temp dir needs to be on the same drive as the cwd
+function getTempBaseDir(): string {
+  const tmpDir = os.tmpdir()
+  if (
+    isWindows &&
+    path.parse(tmpDir).root.toLowerCase() !==
+      path.parse(process.cwd()).root.toLowerCase()
+  ) {
+    const baseDir = path.resolve('temp')
+    fs.mkdirSync(baseDir, { recursive: true })
+    return baseDir
+  }
+  return tmpDir
+}
 
 describe('optimized deps sourcemap handler', () => {
   let tmpDir: string
@@ -153,7 +170,7 @@ describe('fs serving access check with resolved ids', () => {
   beforeAll(async () => {
     // use the native realpath so that Windows 8.3 short names are expanded
     tmpDir = fs.realpathSync.native(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'vite-transform-fs-')),
+      fs.mkdtempSync(path.join(getTempBaseDir(), 'vite-transform-fs-')),
     )
     root = path.join(tmpDir, 'root')
     fs.mkdirSync(path.join(root, 'src'), { recursive: true })
