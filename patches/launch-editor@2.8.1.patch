@@ -106,3 +106,24 @@ index 55e731607a43e51b09d5d7656d8e2b9761afad68..33afe1b0e5b9974f8feb6b3fe586c36e
    } else {
      _childProcess = childProcess.spawn(editor, args, { stdio: 'inherit' })
    }
+diff --git a/index.js b/index.js
+index 33afe1b0e5b9974f8feb6b3fe586c36e30f867b4..0d5a4ed5f3efb3a05750628b15157014c5d3d66e 100644
+--- a/index.js
++++ b/index.js
+@@ -84,4 +84,9 @@ function launchEditor (file, specifiedEditor, onErrorCallback) {
+   }
+ 
++  // Always pass an absolute file name to the editor so that a file name
++  // starting with `-` or `+` cannot be parsed as an editor option
++  // (e.g. `+call system(...)` for vim or `--eval=...` for emacs).
++  fileName = (process.platform === 'win32' ? path.win32 : path.posix).resolve(fileName)
++
+   if (
+     process.platform === 'linux' &&
+@@ -95,5 +100,5 @@ function launchEditor (file, specifiedEditor, onErrorCallback) {
+     // When a Windows editor is specified, interop functionality can
+     // handle the path translation, but only if a relative path is used.
+-    fileName = path.relative('', fileName)
++    fileName = `./${path.relative('', fileName)}`
+   }
+ 

@@ -11,6 +11,7 @@ import {
   test,
   vi,
 } from 'vitest'
+import { isWindows } from '../../../shared/utils'
 
 // The `/__open-in-editor` endpoint is served by `launch-editor-middleware`,
 // which passes the requested `file` to `launch-editor`. Load the very same
@@ -37,6 +38,7 @@ const launchEditorMiddleware: () => (
 const childProcess: typeof import('node:child_process') =
   _require('node:child_process')
 const fs: typeof import('node:fs') = _require('node:fs')
+const nodeOs: typeof import('node:os') = _require('node:os')
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(
   process,
@@ -225,5 +227,161 @@ describe('launch-editor command injection on Windows', () => {
         expect(unescapedCmdMetaChars(launchCommand)).toEqual([])
       },
     )
+  })
+})
+
+describe('launch-editor argument injection', () => {
+  let execSpy: MockInstance
+  let spawnSpy: MockInstance
+
+  beforeEach(() => {
+    execSpy = vi
+      .spyOn(childProcess, 'exec')
+      .mockImplementation((() => createFakeChildProcess()) as any)
+    spawnSpy = vi
+      .spyOn(childProcess, 'spawn')
+      .mockImplementation((() => createFakeChildProcess()) as any)
+  })
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', platformDescriptor)
+    execSpy.mockRestore()
+    spawnSpy.mockRestore()
+  })
+
+  // pretend that the (attacker-placed) file exists
+  function withExistingFile(fn: () => void) {
+    const existsSyncSpy = vi.spyOn(fs, 'existsSync').mockReturnValue(true)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      fn()
+    } finally {
+      existsSyncSpy.mockRestore()
+      logSpy.mockRestore()
+    }
+  }
+
+  function launch(file: string, editor: string) {
+    withExistingFile(() => launchEditor(file, editor))
+  }
+
+  function spawnedArgs(editor: string): unknown[] {
+    expect(execSpy).not.toHaveBeenCalled()
+    expect(spawnSpy).toHaveBeenCalledTimes(1)
+    expect(spawnSpy.mock.calls[0][0]).toBe(editor)
+    return spawnSpy.mock.calls[0][1]
+  }
+
+  test('resolves a relative file name to an absolute path', () => {
+    setPlatform('linux')
+    launch('file.js', 'vim')
+    expect(spawnedArgs('vim')).toEqual([path.posix.resolve('file.js')])
+  })
+
+  test('resolves a relative file name with a position', () => {
+    setPlatform('linux')
+    launch('file.js:10:5', 'code')
+    expect(spawnedArgs('code')).toEqual([
+      '-r',
+      '-g',
+      `${path.posix.resolve('file.js')}:10:5`,
+    ])
+  })
+
+  const optionLikeCases: [editor: string, file: string][] = [
+    ['vim', '+call writefile(["marker"], "LAUNCH_EDITOR_MARKER")|qa!'],
+    ['mvim', '-ccall writefile(["marker"], "LAUNCH_EDITOR_MARKER")|qa!'],
+    ['gvim', '+call writefile(["marker"], "LAUNCH_EDITOR_MARKER")|qa!'],
+    ['emacs', '--eval=(write-region "marker" nil "LAUNCH_EDITOR_MARKER")'],
+    ['emacsclient', '-eatouch LAUNCH_EDITOR_MARKER'],
+    ['notepad++', '-pluginMessage=LAUNCH_EDITOR_MARKER'],
+  ]
+
+  describe.each(['', ':10:5'])('with position %j', (position) => {
+    test.each(optionLikeCases)(
+      '%s does not parse %j as an option',
+      (editor, file) => {
+        setPlatform('linux')
+        launch(file + position, editor)
+        const args = spawnedArgs(editor)
+        const fileArg = String(args[args.length - 1])
+        expect(fileArg).toBe(path.posix.resolve(file))
+        expect(fileArg).not.toMatch(/^[-+]/)
+        expect(args).not.toContain(file)
+      },
+    )
+  })
+
+  test.each(['', ':10:5'])('notepad++ on Windows %j', (position) => {
+    setPlatform('win32')
+    const file = '-pluginMessage=LAUNCH_EDITOR_MARKER'
+    launch(file + position, 'notepad++')
+    expect(spawnSpy).not.toHaveBeenCalled()
+    expect(execSpy).toHaveBeenCalledTimes(1)
+    const escapedFile = path.win32.resolve(file).replace(/[&|<>,;=^]/g, '^$&')
+    expect(execSpy.mock.calls[0][0]).toBe(
+      position
+        ? `notepad++ -n10 -c5 ^"${escapedFile}^"`
+        : `notepad++ ^"${escapedFile}^"`,
+    )
+  })
+
+  // path.relative() is win32-flavored on a Windows host
+  describe.skipIf(isWindows)('on WSL', () => {
+    let releaseSpy: MockInstance
+    let cwdSpy: MockInstance
+
+    beforeEach(() => {
+      setPlatform('linux')
+      releaseSpy = vi
+        .spyOn(nodeOs, 'release')
+        .mockReturnValue('4.4.0-43-Microsoft')
+      cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue('/mnt/c/project')
+    })
+
+    afterEach(() => {
+      releaseSpy.mockRestore()
+      cwdSpy.mockRestore()
+    })
+
+    test('uses a ./-prefixed path for files on a Windows drive', () => {
+      cwdSpy.mockReturnValue('/home/user/project')
+      launch('/mnt/c/project/file.js', 'vim')
+      expect(spawnedArgs('vim')).toEqual(['./../../../mnt/c/project/file.js'])
+    })
+
+    test('resolves a relative path before converting it', () => {
+      launch('file.js', 'vim')
+      expect(spawnedArgs('vim')).toEqual(['./file.js'])
+    })
+
+    test.each(['', ':10:5'])(
+      'prefixes an option-like file name %j',
+      (position) => {
+        const file = '+call system("touch LAUNCH_EDITOR_MARKER")'
+        launch(file + position, 'vim')
+        const args = spawnedArgs('vim')
+        expect(args[args.length - 1]).toBe(`./${file}`)
+        expect(args).not.toContain(file)
+      },
+    )
+
+    test('middleware does not pass an option-like file name', () => {
+      const file = '+call system("touch LAUNCH_EDITOR_MARKER")'
+      const end = vi.fn()
+      vi.stubEnv('LAUNCH_EDITOR', 'vim')
+      try {
+        withExistingFile(() => {
+          launchEditorMiddleware()(
+            { url: `/?file=${encodeURIComponent(file)}` },
+            { end },
+          )
+        })
+      } finally {
+        vi.unstubAllEnvs()
+      }
+      expect(end).toHaveBeenCalledTimes(1)
+      expect(spawnedArgs('vim')).toEqual([`./${file}`])
+    })
   })
 })
